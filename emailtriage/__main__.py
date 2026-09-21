@@ -4,6 +4,8 @@
   python -m emailtriage learn-style    build config/style.json from your Sent Items
   python -m emailtriage run [--hours N] [--limit N] [--force]   triage recent inbox mail once
   python -m emailtriage sample [--hours N]  dry run: print what Jev would decide, store nothing, no drafts
+  python -m emailtriage digest [--send]  print today's digest, or post it to Slack
+  python -m emailtriage sync-tags      refresh the shared tag set now
   python -m emailtriage watch          keep polling the inbox
   python -m emailtriage serve          dashboard + watcher (the normal way to run it)
 """
@@ -113,6 +115,25 @@ def cmd_sample(args) -> int:
     return 0
 
 
+def cmd_digest(args) -> int:
+    from . import digest
+
+    if args.send:
+        d = digest.send_now(args.hours)
+        print(f"Posted to Slack: {d['counts']}")
+    else:
+        print(digest.render_text(digest.build(args.hours)))
+    return 0
+
+
+def cmd_sync_tags(_args) -> int:
+    from . import shared_tags
+
+    res = shared_tags.sync(force=True)
+    print(res if res.get("enabled") else "SHARED_TAGS_SOURCE is not set in .env")
+    return 0 if not res.get("error") else 1
+
+
 def cmd_watch(args) -> int:
     from . import pipeline
 
@@ -160,6 +181,11 @@ def main(argv: list[str] | None = None) -> int:
         sp.add_argument("--limit", type=int, default=300)
         sp.add_argument("--force", action="store_true", help="re-assess emails already processed")
         sp.set_defaults(fn=fn)
+    dg = sub.add_parser("digest")
+    dg.add_argument("--hours", type=float, default=None)
+    dg.add_argument("--send", action="store_true", help="post to Slack instead of printing")
+    dg.set_defaults(fn=cmd_digest)
+    sub.add_parser("sync-tags").set_defaults(fn=cmd_sync_tags)
     w = sub.add_parser("watch")
     w.add_argument("--poll", type=int, default=None)
     w.set_defaults(fn=cmd_watch)

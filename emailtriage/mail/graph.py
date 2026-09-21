@@ -22,7 +22,7 @@ from typing import Iterator
 import httpx
 
 from ..config import ROOT, settings
-from ..models import Email
+from ..models import Email, ThreadMessage
 from ..text import html_to_text, normalize_whitespace, strip_quoted
 from .base import MailBackend
 
@@ -186,6 +186,30 @@ class GraphBackend(MailBackend):
         new_html = existing[: m.end()] + body_html + existing[m.end():] if m else body_html + existing
         self._req("PATCH", f"/me/messages/{draft['id']}", json={"body": {"contentType": "html", "content": new_html}})
         return draft["id"]
+
+    def thread_messages(self, email: Email) -> list[ThreadMessage]:
+        if not email.conversation_id:
+            return []
+        _, owner_email = self.owner()
+        cid = email.conversation_id.replace("'", "''")
+        data = self._req(
+            "GET", "/me/messages",
+            params={"$filter": f"conversationId eq '{cid}' and isDraft eq false",
+                    "$select": "from,receivedDateTime,sentDateTime,parentFolderId", "$top": 50},
+        ).json()
+        out = []
+        for m in data.get("value", []):
+            frm = (m.get("from") or {}).get("emailAddress") or {}
+            addr = frm.get("address", "") or ""
+            from_owner = bool(owner_email) and addr.lower() == owner_email.lower()
+            stamp = m.get("sentDateTime") if from_owner else m.get("receivedDateTime")
+            try:
+                dt = datetime.fromisoformat((stamp or "").replace("Z", "+00:00"))
+            except Exception:
+                continue
+            out.append(ThreadMessage(sender_name=frm.get("name", "") or "", sender_email=addr, received=dt, from_owner=from_owner))
+        out.sort(key=lambda t: t.received)
+        return out
 
     def delete_draft(self, draft_id: str) -> None:
         try:

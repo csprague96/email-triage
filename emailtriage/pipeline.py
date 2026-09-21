@@ -1,4 +1,4 @@
-"""Fetch -> assess -> tag -> (draft) -> notify. Used by the CLI, the watcher, and the dashboard."""
+"""Fetch -> thread check -> assess -> tag -> (draft) -> notify. Used by the CLI, the watcher, and the dashboard."""
 
 from __future__ import annotations
 
@@ -7,13 +7,13 @@ import time
 import traceback
 from datetime import datetime, timedelta, timezone
 
-from . import jev, store
-from .config import settings
-from .config import load_style
+from . import digest, jev, shared_tags, store
+from .config import load_style, settings
 from .drafter import draft_reply, render_draft_html
 from .mail import get_backend
-from .models import Assessment, DraftResult, Email
+from .models import Assessment, DraftResult, Email, ThreadInfo
 from .notify import toast
+from .text import domain_of
 
 CATEGORY_PREFIX = "Priority: "
 _run_lock = threading.Lock()
@@ -23,6 +23,104 @@ def _owner() -> tuple[str, str]:
     name, addr = get_backend().owner()
     return name or "Me", addr or ""
 
+
+def _fmt(dt: datetime) -> str:
+    return dt.astimezone().strftime("%d %b %H:%M")
+
+
+# ---- thread awareness ---------------------------------------------------------
+
+def analyze_thread(email: Email, owner_email: str) -> ThreadInfo:
+    """Look at the whole conversation to see whether this email still needs anything."""
+    info = ThreadInfo()
+    try:
+        msgs = get_backend().thread_messages(email)
+    except Exception as err:
+        info.note = f"Thread lookup failed: {err}"
+        return info
+    if not msgs:
+        return info
+    info.messages = len(msgs)
+    owner_domain = domain_of(owner_email)
+    after = [m for m in msgs if m.received > email.received + timedelta(seconds=30)]
+    newest = msgs[-1]
+    if newest.received > email.received + timedelta(seconds=30):
+        info.is_latest = False
+        info.newer_from = "you" if newest.from_owner else (newest.sender_name or newest.sender_email)
+    owner_after = [m for m in after if m.from_owner]
+    if owner_after:
+        info.owner_replied_after = owner_after[0].received.isoformat()
+    colleague_after = [m for m in after if not m.from_owner and owner_domain and domain_of(m.sender_email) == owner_domain]
+    if colleague_after:
+        m = colleague_after[0]
+        info.colleague_replied_after = f"{m.sender_name or m.sender_email} ({m.received.isoformat()})"
+
+    notes = []
+    if info.owner_replied_after:
+        notes.append(f"You replied on this thread at {_fmt(owner_after[0].received)}.")
+    if colleague_after:
+        notes.append(f"{colleague_after[0].sender_name or 'A colleague'} replied at {_fmt(colleague_after[0].received)}.")
+    if not info.is_latest and not notes:
+        notes.append(f"Thread has moved on: newest message is from {info.newer_from}.")
+    info.note = " ".join(notes)
+    return info
+
+
+def apply_thread_rules(assessment: Assessment, email: Email, owner_email: str, thread: ThreadInfo) -> bool:
+    """Adjust priority for thread state. Returns True when a draft should still be considered."""
+    assessment.thread = thread
+    owner_in_to = any(owner_email.lower() == t.lower() for t in email.to) if owner_email else True
+    if thread.owner_replied_after:
+        if assessment.priority in ("medium", "high", "urgent"):
+            assessment.adjusted_by_rule = (assessment.adjusted_by_rule + " " if assessment.adjusted_by_rule else "") + \
+                "Dropped to low: you already replied on this thread."
+            assessment.priority = "low"
+        return False
+    if thread.colleague_replied_after and not owner_in_to:
+        assessment.adjusted_by_rule = (assessment.adjusted_by_rule + " " if assessment.adjusted_by_rule else "") + \
+            "No draft: a colleague replied and you were only copied."
+        if assessment.priority in ("high", "urgent"):
+            assessment.priority = "medium"
+        return False
+    if not thread.is_latest:
+        assessment.adjusted_by_rule = (assessment.adjusted_by_rule + " " if assessment.adjusted_by_rule else "") + \
+            f"No draft: a newer message from {thread.newer_from} is on this thread."
+        return False
+    return True
+
+
+def supersede_older_drafts(email: Email) -> int:
+    """A new message on a thread makes any unsent draft for an older message stale."""
+    stale = store.ready_drafts_in_conversation(email.conversation_id, exclude_email_id=email.id)
+    for d in stale:
+        store.set_draft_status(d["id"], "superseded")
+    return len(stale)
+
+
+def reconcile_drafts() -> int:
+    """Mark ready drafts done when the owner has since replied on the thread. Called by the watcher."""
+    backend = get_backend()
+    _, owner_email = _owner()
+    done = 0
+    for d in store.list_ready_drafts_with_conversation(limit=50):
+        em = backend.get(d["email_id"])
+        if not em:
+            continue
+        try:
+            created = datetime.fromisoformat(d["created_at"])
+        except Exception:
+            created = em.received
+        try:
+            msgs = backend.thread_messages(em)
+        except Exception:
+            continue
+        if any(m.from_owner and m.received > created for m in msgs):
+            store.set_draft_status(d["id"], "done")
+            done += 1
+    return done
+
+
+# ---- core steps ------------------------------------------------------------------
 
 def apply_categories(email_id: str, assessment: Assessment) -> None:
     if not settings.apply_outlook_categories:
@@ -52,23 +150,34 @@ def process_email(email: Email, force: bool = False, draft: bool | None = None) 
         return None
     owner_name, owner_email = _owner()
     if email.sender_email and owner_email and email.sender_email.lower() == owner_email.lower() and not force:
-        # Mail we sent to ourselves (meeting invites etc.): store as low without spending a Jev call.
         assessment = Assessment(priority="low", confidence=1.0, probabilities={"low": 1.0}, signals={},
                                 time_sensitivity=0.0, tags=[], tag_scores={}, jev_priority="low",
                                 adjusted_by_rule="Sent by the mailbox owner; skipped.", needs_review=False)
+        draft_ok = False
     else:
         assessment = jev.assess(email, owner_email, owner_name)
+        thread = analyze_thread(email, owner_email)
+        draft_ok = apply_thread_rules(assessment, email, owner_email, thread)
+
     store.save_email(email)
     store.save_assessment(email.id, assessment)
     apply_categories(email.id, assessment)
+    superseded = supersede_older_drafts(email)
+    if superseded:
+        print(f"[thread] {superseded} older draft(s) superseded by '{email.subject[:50]}'", flush=True)
 
-    should_draft = draft if draft is not None else (
-        settings.drafting_enabled and assessment.priority in settings.draft_for_priorities
-        and assessment.signals.get("automated", 0) < 0.7
-    )
+    if draft is None:
+        should_draft = (
+            draft_ok
+            and settings.drafting_enabled
+            and assessment.priority in settings.draft_for_priorities
+            and assessment.signals.get("automated", 0) < 0.7
+        )
+    else:
+        should_draft = draft
     if should_draft:
         try:
-            draft_id, result = make_draft(email)
+            make_draft(email)
             toast(
                 f"Draft ready: {assessment.priority.upper()} email",
                 f"{email.sender_name}: {email.subject}",
@@ -95,7 +204,10 @@ def run_once(since: datetime | None = None, limit: int = 300, force: bool = Fals
         newest: datetime | None = None
         counts: dict[str, int] = {}
         t0 = time.time()
-        for email in backend.inbox_since(since, limit=limit):
+        # Oldest first so a reply on a thread supersedes the draft for the message before it.
+        batch = list(backend.inbox_since(since, limit=limit))
+        batch.sort(key=lambda e: e.received)
+        for email in batch:
             if newest is None or email.received > newest:
                 newest = email.received
             try:
@@ -112,7 +224,8 @@ def run_once(since: datetime | None = None, limit: int = 300, force: bool = Fals
             if verbose:
                 flag = " (review)" if a.needs_review else ""
                 tags = f"  [{', '.join(a.tags)}]" if a.tags else ""
-                print(f"  {a.priority:<7} {a.confidence:.2f}{flag}  {email.sender_name[:22]:<22} {email.subject[:60]}{tags}", flush=True)
+                thread = f"  {{{a.thread.note}}}" if a.thread and a.thread.note else ""
+                print(f"  {a.priority:<7} {a.confidence:.2f}{flag}  {email.sender_name[:22]:<22} {email.subject[:60]}{tags}{thread}", flush=True)
         if newest is not None:
             store.set_meta("last_seen_received", newest.isoformat())
         note = f"processed {processed}, skipped {skipped}, errors {errors} in {time.time() - t0:.1f}s"
@@ -125,6 +238,28 @@ def run_once(since: datetime | None = None, limit: int = 300, force: bool = Fals
         _run_lock.release()
 
 
+def housekeeping() -> None:
+    """Periodic chores that ride along with the watcher: shared tags, draft reconciliation, digest."""
+    try:
+        res = shared_tags.sync(force=False)
+        if res.get("error"):
+            print(f"[shared-tags] {res['error']}", flush=True)
+    except Exception as err:
+        print(f"[shared-tags] {err}", flush=True)
+    try:
+        done = reconcile_drafts()
+        if done:
+            print(f"[thread] marked {done} draft(s) done because you replied", flush=True)
+    except Exception as err:
+        print(f"[thread] reconcile failed: {err}", flush=True)
+    try:
+        if digest.due_now():
+            digest.send_now()
+            print("[digest] posted to Slack", flush=True)
+    except Exception as err:
+        print(f"[digest] failed: {err}", flush=True)
+
+
 def watch(poll_seconds: int | None = None, stop_event: threading.Event | None = None) -> None:
     poll = poll_seconds or settings.poll_seconds
     stop_event = stop_event or threading.Event()
@@ -135,4 +270,5 @@ def watch(poll_seconds: int | None = None, stop_event: threading.Event | None = 
         except Exception as err:
             print(f"[watch] run failed: {err}", flush=True)
             traceback.print_exc()
+        housekeeping()
         stop_event.wait(poll)
