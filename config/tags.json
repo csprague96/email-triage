@@ -1,0 +1,46 @@
+{
+  "_comment": "Each tag is a yes/no question Jev answers about every email. An email gets the tag when the probability is at or above the threshold. Edit here or in the dashboard Tags page.",
+  "default_threshold": 0.6,
+  "tags": [
+    {
+      "name": "Surcharging",
+      "description": "The email is about credit card surcharging: surcharge rates, enablement, eligibility rules, or the Sola Terminal surcharge release.",
+      "color": "#7c3aed"
+    },
+    {
+      "name": "Chargebacks",
+      "description": "The email is about chargebacks, disputes, or the RCVR chargeback management integration.",
+      "color": "#dc2626"
+    },
+    {
+      "name": "Partner / Customer",
+      "description": "An external partner, ISO, merchant, or vendor is asking for something or reporting a problem.",
+      "color": "#0891b2"
+    },
+    {
+      "name": "Jira / Dev updates",
+      "description": "An automated Jira, GitHub, or development tracker notification about a ticket, story, or build.",
+      "color": "#64748b"
+    },
+    {
+      "name": "Meeting / Scheduling",
+      "description": "Scheduling, rescheduling, accepting, or preparing for a meeting or call.",
+      "color": "#059669"
+    },
+    {
+      "name": "Access / Credentials",
+      "description": "Requests for access, API keys, sandbox credentials, passwords, or account permissions.",
+      "color": "#d97706"
+    },
+    {
+      "name": "Security / Quarantine",
+      "description": "Security alerts, quarantine reports, phishing warnings, or token expiry notices.",
+      "color": "#475569"
+    },
+    {
+      "name": "Product feedback",
+      "description": "A merchant, partner, or colleague is giving feedback or making a feature request about a product.",
+      "color": "#db2777"
+    }
+  ]
+}

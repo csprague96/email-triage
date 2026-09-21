@@ -1,0 +1,8 @@
+typesafe-sdk>=0.7.0
+openai>=2.0
+pywin32>=306; sys_platform == "win32"
+winotify>=1.1; sys_platform == "win32"
+msal>=1.30
+fastapi>=0.110
+uvicorn>=0.29
+python-dotenv>=1.0
