@@ -144,12 +144,42 @@ def cmd_watch(args) -> int:
     return 0
 
 
+def _log_to_file_if_headless() -> None:
+    """Under pythonw.exe (the background job) there is no console; write output to data/watcher.log."""
+    if sys.stdout is not None and sys.stderr is not None:
+        return
+    from .config import DATA_DIR, ensure_dirs
+
+    ensure_dirs()
+    log = DATA_DIR / "watcher.log"
+    if log.exists() and log.stat().st_size > 5_000_000:  # keep the log from growing forever
+        log.replace(log.with_suffix(".log.1"))
+
+    class _Stream:
+        def __init__(self):
+            self.fh = open(log, "a", encoding="utf-8", buffering=1)
+
+        def write(self, s):
+            if s.strip():
+                self.fh.write(datetime.now().strftime("%Y-%m-%d %H:%M:%S ") + s.rstrip("\n") + "\n")
+
+        def flush(self):
+            self.fh.flush()
+
+        def isatty(self):
+            return False
+
+    sys.stdout = sys.stderr = _Stream()
+    print(f"[serve] started headless, logging to {log}")
+
+
 def cmd_serve(args) -> int:
     import uvicorn
 
     from . import server
     from .config import settings
 
+    _log_to_file_if_headless()
     if not args.no_watch:
         server.start_watcher()
     url = f"http://127.0.0.1:{settings.port}"
@@ -159,14 +189,15 @@ def cmd_serve(args) -> int:
             webbrowser.open(url)
         except Exception:
             pass
-    uvicorn.run(server.app, host="127.0.0.1", port=settings.port, log_level="warning")
+    uvicorn.run(server.app, host="127.0.0.1", port=settings.port, log_level="warning", log_config=None)
     return 0
 
 
 def main(argv: list[str] | None = None) -> int:
     for stream in (sys.stdout, sys.stderr):  # Windows consoles default to cp1252; email text is not.
         try:
-            stream.reconfigure(encoding="utf-8", errors="replace")
+            if stream is not None:
+                stream.reconfigure(encoding="utf-8", errors="replace")
         except Exception:
             pass
     p = argparse.ArgumentParser(prog="emailtriage", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)

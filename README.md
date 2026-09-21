@@ -16,7 +16,10 @@ Requirements: Windows, classic Outlook desktop signed in to your mailbox, Python
 3. Put your keys in `.env`:
    - `TYPESAFE_API_KEY` from https://console.typesafe.ai/ (required)
    - `OPENAI_API_KEY` (optional; without it you get priorities and tags but no drafts)
-4. Double-click `start.cmd`. The dashboard opens in your browser and the inbox watcher starts polling every two minutes.
+4. Run `install-background.ps1` the same way. It registers a Windows scheduled task that starts the watcher hidden at every logon, restarts it if it stops, and starts it right now. From then on mail is triaged every `POLL_SECONDS` (default 120) without you doing anything. Output goes to `data\watcher.log`.
+5. Double-click `start.cmd` any time to open the dashboard. If the background job is not running it starts the watcher in a window instead.
+
+To remove the background job run `uninstall-background.ps1`. Classic Outlook needs to be running for the watcher to read mail; the job will start it if it isn't.
 
 Preview what Jev would decide without saving anything or touching Outlook:
 
