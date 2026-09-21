@@ -5,3 +5,4 @@ config/style.json
 __pycache__/
 *.pyc
 .graph_token_cache.json
+config/shared_tags.cache.json

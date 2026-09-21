@@ -6,11 +6,16 @@ from abc import ABC, abstractmethod
 from datetime import datetime
 from typing import Iterator
 
-from ..models import Email
+from ..models import Email, ThreadMessage
 
 
 class MailBackend(ABC):
     name: str = "base"
+
+    def thread_messages(self, email: Email) -> list[ThreadMessage]:
+        """All messages in the same conversation (Inbox and Sent Items), oldest first.
+        Backends that cannot do this return an empty list and thread awareness is skipped."""
+        return []
 
     @abstractmethod
     def owner(self) -> tuple[str, str]:

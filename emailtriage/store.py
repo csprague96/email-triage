@@ -57,8 +57,16 @@ def conn() -> sqlite3.Connection:
             _conn = sqlite3.connect(DB_FILE, check_same_thread=False)
             _conn.row_factory = sqlite3.Row
             _conn.executescript(SCHEMA)
+            _migrate(_conn)
             _conn.commit()
         return _conn
+
+
+def _migrate(c: sqlite3.Connection) -> None:
+    """Additive schema changes for databases created by earlier versions."""
+    cols = {r[1] for r in c.execute("PRAGMA table_info(assessments)").fetchall()}
+    if "thread_json" not in cols:
+        c.execute("ALTER TABLE assessments ADD COLUMN thread_json TEXT")
 
 
 def get_meta(key: str, default: str | None = None) -> str | None:
@@ -93,19 +101,26 @@ def save_email(email: Email) -> None:
 
 
 def save_assessment(email_id: str, a: Assessment) -> None:
+    thread_json = json.dumps(a.thread.to_dict()) if a.thread else None
     with _lock:
         conn().execute(
             """INSERT OR REPLACE INTO assessments(email_id,priority,confidence,probabilities,signals,time_sensitivity,
-               tags,tag_scores,jev_priority,adjusted_by_rule,needs_review,model,input_tokens,user_priority,user_tags,assessed_at)
+               tags,tag_scores,jev_priority,adjusted_by_rule,needs_review,model,input_tokens,user_priority,user_tags,assessed_at,thread_json)
                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,
                  (SELECT user_priority FROM assessments WHERE email_id=?),
-                 (SELECT user_tags FROM assessments WHERE email_id=?), ?)""",
+                 (SELECT user_tags FROM assessments WHERE email_id=?), ?, ?)""",
             (
                 email_id, a.priority, a.confidence, json.dumps(a.probabilities), json.dumps(a.signals),
                 a.time_sensitivity, json.dumps(a.tags), json.dumps(a.tag_scores), a.jev_priority,
-                a.adjusted_by_rule, int(a.needs_review), a.model, a.input_tokens, email_id, email_id, _now(),
+                a.adjusted_by_rule, int(a.needs_review), a.model, a.input_tokens, email_id, email_id, _now(), thread_json,
             ),
         )
+        conn().commit()
+
+
+def update_thread(email_id: str, thread: dict) -> None:
+    with _lock:
+        conn().execute("UPDATE assessments SET thread_json=? WHERE email_id=?", (json.dumps(thread), email_id))
         conn().commit()
 
 
@@ -124,6 +139,28 @@ def set_draft_status(draft_id: int, status: str) -> None:
     with _lock:
         conn().execute("UPDATE drafts SET status=? WHERE id=?", (status, draft_id))
         conn().commit()
+
+
+def ready_drafts_in_conversation(conversation_id: str, exclude_email_id: str = "") -> list[dict]:
+    if not conversation_id:
+        return []
+    with _lock:
+        rows = conn().execute(
+            """SELECT d.* FROM drafts d JOIN emails e ON e.id=d.email_id
+               WHERE d.status='ready' AND e.conversation_id=? AND e.id<>?""",
+            (conversation_id, exclude_email_id),
+        ).fetchall()
+    return [_draft_row(r) for r in rows]
+
+
+def list_ready_drafts_with_conversation(limit: int = 50) -> list[dict]:
+    with _lock:
+        rows = conn().execute(
+            """SELECT d.id, d.email_id, d.created_at, e.conversation_id FROM drafts d JOIN emails e ON e.id=d.email_id
+               WHERE d.status='ready' ORDER BY d.id DESC LIMIT ?""",
+            (limit,),
+        ).fetchall()
+    return [dict(r) for r in rows]
 
 
 def get_draft(draft_id: int) -> dict | None:
@@ -200,7 +237,7 @@ def recent_corrections(limit: int = 8) -> list[dict]:
 def list_emails(priority: str | None = None, tag: str | None = None, review: bool | None = None,
                 search: str | None = None, limit: int = 200) -> list[dict]:
     q = """SELECT e.*, a.priority, a.confidence, a.probabilities, a.signals, a.time_sensitivity, a.tags, a.tag_scores,
-                  a.jev_priority, a.adjusted_by_rule, a.needs_review, a.user_priority, a.user_tags,
+                  a.jev_priority, a.adjusted_by_rule, a.needs_review, a.user_priority, a.user_tags, a.thread_json,
                   (SELECT COUNT(*) FROM drafts d WHERE d.email_id=e.id AND d.status='ready') AS ready_drafts
            FROM emails e JOIN assessments a ON a.email_id=e.id WHERE 1=1"""
     args: list = []
@@ -230,7 +267,7 @@ def get_email(email_id: str) -> dict | None:
     with _lock:
         r = conn().execute(
             """SELECT e.*, a.priority, a.confidence, a.probabilities, a.signals, a.time_sensitivity, a.tags, a.tag_scores,
-                      a.jev_priority, a.adjusted_by_rule, a.needs_review, a.user_priority, a.user_tags, 0 AS ready_drafts
+                      a.jev_priority, a.adjusted_by_rule, a.needs_review, a.user_priority, a.user_tags, a.thread_json, 0 AS ready_drafts
                FROM emails e LEFT JOIN assessments a ON a.email_id=e.id WHERE e.id=?""",
             (email_id,),
         ).fetchone()
@@ -255,8 +292,41 @@ def _email_row(r: sqlite3.Row) -> dict:
         "tags": user_tags if user_tags is not None else tags, "model_tags": tags,
         "tag_scores": json.loads(r["tag_scores"] or "{}"), "jev_priority": r["jev_priority"],
         "adjusted_by_rule": r["adjusted_by_rule"], "needs_review": bool(r["needs_review"]),
-        "ready_drafts": r["ready_drafts"],
+        "ready_drafts": r["ready_drafts"], "conversation_id": r["conversation_id"],
+        "thread": json.loads(r["thread_json"]) if r["thread_json"] else None,
     }
+
+
+def emails_since(since_iso: str, priorities: list[str] | None = None, review_only: bool = False, limit: int = 50) -> list[dict]:
+    q = """SELECT e.id, e.subject, e.sender_name, e.sender_email, e.received, a.tags, a.user_tags,
+                  COALESCE(a.user_priority, a.priority) AS priority, a.confidence, a.needs_review
+           FROM emails e JOIN assessments a ON a.email_id=e.id WHERE e.received >= ?"""
+    args: list = [since_iso]
+    if priorities:
+        q += f" AND COALESCE(a.user_priority, a.priority) IN ({','.join('?' * len(priorities))})"
+        args += priorities
+    if review_only:
+        q += " AND a.needs_review=1 AND COALESCE(a.user_priority, a.priority) NOT IN ('junk')"
+    q += " ORDER BY e.received DESC LIMIT ?"
+    args.append(limit)
+    with _lock:
+        rows = conn().execute(q, args).fetchall()
+    out = []
+    for r in rows:
+        tags = json.loads(r["user_tags"]) if r["user_tags"] else json.loads(r["tags"] or "[]")
+        out.append({"id": r["id"], "subject": r["subject"], "sender_name": r["sender_name"], "sender_email": r["sender_email"],
+                    "received": r["received"], "tags": tags, "priority": r["priority"], "confidence": r["confidence"]})
+    return out
+
+
+def counts_since(since_iso: str) -> dict:
+    with _lock:
+        rows = conn().execute(
+            """SELECT COALESCE(a.user_priority, a.priority), COUNT(*) FROM emails e JOIN assessments a ON a.email_id=e.id
+               WHERE e.received >= ? GROUP BY 1""",
+            (since_iso,),
+        ).fetchall()
+    return {r[0]: r[1] for r in rows}
 
 
 def stats() -> dict:

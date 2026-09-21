@@ -87,6 +87,7 @@
     <a href="#drafts" data-view="drafts">Drafts <span id="draftCount" class="muted"></span></a>
     <a href="#tags" data-view="tags">Tags</a>
     <a href="#priorities" data-view="priorities">Priorities</a>
+    <a href="#digest" data-view="digest">Digest</a>
     <a href="#style" data-view="style">Writing style</a>
   </nav>
   <div class="spacer"></div>
@@ -114,13 +115,19 @@
   <!-- DRAFTS -->
   <section id="view-drafts" class="hidden">
     <p class="note">Drafts are saved in your Outlook Drafts folder as replies to the original email. Open one, read it, edit, send. Nothing is ever sent automatically.</p>
-    <div class="toolbar"><select id="draftStatus"><option value="ready">Ready for review</option><option value="opened">Opened</option><option value="done">Done</option><option value="discarded">Discarded</option><option value="all">All</option></select></div>
+    <div class="toolbar"><select id="draftStatus"><option value="ready">Ready for review</option><option value="opened">Opened</option><option value="done">Done</option><option value="superseded">Superseded (thread moved on)</option><option value="discarded">Discarded</option><option value="all">All</option></select></div>
     <div id="draftList"></div>
   </section>
 
   <!-- TAGS -->
   <section id="view-tags" class="hidden">
     <p class="note">Each tag is a yes/no question Jev answers for every email. Write the description as the thing that makes the tag apply. Changes take effect for newly triaged mail; use "Re-assess" on an email to apply them retroactively.</p>
+    <div class="box" id="sharedBox">
+      <h4>Shared team tags <span class="muted" id="sharedMeta"></span></h4>
+      <div id="sharedList" class="muted" style="font-size:12.5px"></div>
+      <div class="rowbtns"><button id="syncTags">Sync now</button><span class="muted" id="sharedHint" style="font-size:12px;align-self:center"></span></div>
+    </div>
+    <h3>My tags</h3>
     <div class="toolbar">
       <label>Default threshold <input id="tagThreshold" type="number" min="0.1" max="0.99" step="0.05" style="width:80px"></label>
       <button id="addTag">Add tag</button>
@@ -142,6 +149,18 @@
     <h3>Signals</h3>
     <div class="levels" id="signalList"></div>
     <div class="toolbar" style="margin-top:12px"><div class="spacer"></div><button id="savePriority" class="primary">Save</button></div>
+  </section>
+
+  <!-- DIGEST -->
+  <section id="view-digest" class="hidden">
+    <p class="note" id="digestNote"></p>
+    <div class="toolbar">
+      <label>Look back <input id="digestHours" type="number" min="1" max="168" step="1" value="24" style="width:70px"> hours</label>
+      <button id="digestRefresh">Refresh preview</button>
+      <div class="spacer"></div>
+      <button id="digestSend" class="primary">Send to Slack now</button>
+    </div>
+    <pre id="digestText" style="white-space:pre-wrap;background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:14px;font:13px/1.5 inherit"></pre>
   </section>
 
   <!-- STYLE -->
@@ -179,7 +198,7 @@ function tagColor(name) { const t = (state.tags?.tags || []).find(t => t.name ==
 function show(view) {
   $$('section[id^=view-]').forEach(s => s.classList.toggle('hidden', s.id !== 'view-' + view));
   $$('nav a').forEach(a => a.classList.toggle('active', a.dataset.view === view));
-  ({inbox: loadInbox, drafts: loadDrafts, tags: loadTags, priorities: loadPriorities, style: loadStyle})[view]?.();
+  ({inbox: loadInbox, drafts: loadDrafts, tags: loadTags, priorities: loadPriorities, digest: loadDigest, style: loadStyle})[view]?.();
 }
 window.addEventListener('hashchange', () => show(location.hash.slice(1) || 'inbox'));
 
@@ -258,6 +277,7 @@ async function openDetail(id) {
       ${state.status?.drafting_enabled ? '<button id="mkDraft" class="primary">Draft a reply</button>' : ''}
     </div>
     ${e.adjusted_by_rule ? `<p class="review">${esc(e.adjusted_by_rule)}</p>` : ''}
+    ${e.thread && (e.thread.note || e.thread.messages > 1) ? `<p class="muted" style="font-size:12px">Thread: ${e.thread.messages} message${e.thread.messages===1?'':'s'}. ${esc(e.thread.note || (e.thread.is_latest ? 'This is the latest message.' : ''))}</p>` : ''}
     <div class="grid2">
       <div class="box"><h4>Priority (Jev confidence ${(e.confidence*100|0)}%)</h4>${probs}<div class="kv muted"><span>time sensitivity</span><span>${e.time_sensitivity} / 3</span></div></div>
       <div class="box"><h4>Signals</h4>${sig || '<span class="muted">none</span>'}</div>
@@ -329,26 +349,56 @@ $('#draftStatus').onchange = loadDrafts;
 async function loadTags() {
   state.tags = await api('/tags');
   $('#tagThreshold').value = state.tags.default_threshold ?? 0.6;
+  renderSharedTags();
   renderTagList();
 }
+function renderSharedTags() {
+  const shared = state.tags.tags.filter(t => t.shared);
+  const src = state.tags.shared_source;
+  $('#sharedMeta').textContent = src ? `from ${src}${state.tags.shared_synced_at ? ' · synced ' + fmtDate(state.tags.shared_synced_at) : ''}` : '';
+  if (!src) {
+    $('#sharedList').innerHTML = 'Not configured. Set <code>SHARED_TAGS_SOURCE</code> in .env to a URL or file path of a shared tags.json (for example the one in your team repo) and everyone gets the same tags. Shared tags are read-only here; edit the shared file to change them.';
+    $('#syncTags').disabled = true; $('#sharedHint').textContent = '';
+    return;
+  }
+  $('#syncTags').disabled = false;
+  $('#sharedHint').textContent = state.tags.shared_error ? 'Last sync failed: ' + state.tags.shared_error : `${shared.length} shared tag${shared.length===1?'':'s'}`;
+  $('#sharedList').innerHTML = shared.length ? shared.map(t => `<div style="padding:4px 0"><span class="tag" style="background:${esc(t.color||'#64748b')}">${esc(t.name)}</span> ${esc(t.description)}${t.threshold ? ` <span class="muted">(threshold ${t.threshold})</span>` : ''}</div>`).join('') : 'No shared tags fetched yet. Click Sync now.';
+}
+$('#syncTags').onclick = async () => { toast('Syncing shared tags…'); try { const r = await api('/tags/sync', {method:'POST'}); toast(r.error ? 'Sync failed: ' + r.error : `Synced ${r.tags} shared tags`, 5000); loadTags(); } catch (e) { toast(e.message, 5000); } };
 function renderTagList() {
+  const local = state.tags.tags.filter(t => !t.shared);
   $('#tagList').innerHTML = `<div class="item muted" style="font-size:12px"><span></span><span>Name</span><span>When does it apply?</span><span>Threshold</span><span></span></div>` +
-    state.tags.tags.map((t, i) => `<div class="item" data-i="${i}">
+    local.map((t, i) => `<div class="item" data-i="${i}">
       <input type="color" value="${esc(t.color || '#64748b')}" data-f="color">
       <input value="${esc(t.name)}" data-f="name" placeholder="Tag name">
       <textarea data-f="description" style="min-height:48px">${esc(t.description)}</textarea>
       <input type="number" min="0.1" max="0.99" step="0.05" value="${t.threshold ?? ''}" placeholder="${state.tags.default_threshold ?? 0.6}" data-f="threshold">
       <button class="danger" data-del="${i}">Remove</button></div>`).join('');
-  $$('#tagList [data-del]').forEach(b => b.onclick = () => { collectTags(); state.tags.tags.splice(+b.dataset.del, 1); renderTagList(); });
+  $$('#tagList [data-del]').forEach(b => b.onclick = () => { collectTags(); const local = state.tags.tags.filter(t => !t.shared); local.splice(+b.dataset.del, 1); state.tags.tags = state.tags.tags.filter(t => t.shared).concat(local); renderTagList(); });
 }
 function collectTags() {
   state.tags.default_threshold = parseFloat($('#tagThreshold').value) || 0.6;
-  state.tags.tags = $$('#tagList .item[data-i]').map(el => {
-    const t = { name: $('[data-f=name]', el).value.trim(), description: $('[data-f=description]', el).value.trim(), color: $('[data-f=color]', el).value };
+  const local = $$('#tagList .item[data-i]').map(el => {
+    const t = { name: $('[data-f=name]', el).value.trim(), description: $('[data-f=description]', el).value.trim(), color: $('[data-f=color]', el).value, shared: false };
     const th = parseFloat($('[data-f=threshold]', el).value); if (!isNaN(th)) t.threshold = th; return t; });
+  state.tags.tags = state.tags.tags.filter(t => t.shared).concat(local);
 }
-$('#addTag').onclick = () => { collectTags(); state.tags.tags.push({name: '', description: '', color: '#' + Math.floor(Math.random()*0xffffff).toString(16).padStart(6,'0')}); renderTagList(); };
-$('#saveTags').onclick = async () => { collectTags(); try { state.tags = await api('/tags', {method:'PUT', body: state.tags}); renderTagList(); toast('Tags saved'); } catch (e) { toast(e.message, 5000); } };
+$('#addTag').onclick = () => { collectTags(); state.tags.tags.push({name: '', description: '', shared: false, color: '#' + Math.floor(Math.random()*0xffffff).toString(16).padStart(6,'0')}); renderTagList(); };
+$('#saveTags').onclick = async () => { collectTags(); try { state.tags = await api('/tags', {method:'PUT', body: state.tags}); renderSharedTags(); renderTagList(); toast('Tags saved'); } catch (e) { toast(e.message, 5000); } };
+
+// ---- digest
+async function loadDigest() {
+  const s = state.status || {};
+  $('#digestNote').textContent = s.slack_configured
+    ? `Posted to Slack ${s.digest_weekdays_only ? 'every weekday' : 'every day'} at ${s.digest_time} while the watcher is running${s.last_digest_at ? ' · last sent ' + fmtDate(s.last_digest_at) : ''}. Only subjects, sender names and tags are sent.`
+    : 'Slack is not configured. Set SLACK_WEBHOOK_URL (and optionally DIGEST_TIME) in .env to get this posted automatically each morning. You can still preview it here.';
+  $('#digestSend').disabled = !s.slack_configured;
+  const d = await api('/digest/preview?hours=' + ($('#digestHours').value || 24));
+  $('#digestText').textContent = d.text;
+}
+$('#digestRefresh').onclick = loadDigest;
+$('#digestSend').onclick = async () => { toast('Posting to Slack…'); try { await api('/digest/send?hours=' + ($('#digestHours').value || 24), {method:'POST'}); toast('Digest posted'); loadStatus(); } catch (e) { toast(e.message, 6000); } };
 
 // ---- priorities editor
 async function loadPriorities() {

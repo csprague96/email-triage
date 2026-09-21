@@ -10,7 +10,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 
-from . import __version__, pipeline, store, style
+from . import __version__, digest, pipeline, shared_tags, store, style
 from .config import (
     PRIORITY_ORDER,
     load_priority_config,
@@ -73,6 +73,12 @@ def status():
         "watcher_alive": bool(_watcher and _watcher.is_alive()),
         "poll_seconds": settings.poll_seconds,
         "priorities": PRIORITY_ORDER,
+        "shared_tags_source": settings.shared_tags_source,
+        "digest_enabled": settings.digest_enabled,
+        "digest_time": settings.digest_time,
+        "digest_weekdays_only": settings.digest_weekdays_only,
+        "slack_configured": bool(settings.slack_webhook_url),
+        "last_digest_at": store.get_meta("last_digest_at"),
     })
     return s
 
@@ -230,6 +236,31 @@ def put_tags(body: dict):
     except ValueError as err:
         raise HTTPException(400, str(err))
     return load_tags_config()
+
+
+@app.post("/api/tags/sync")
+def sync_tags():
+    res = shared_tags.sync(force=True)
+    if not res.get("enabled"):
+        raise HTTPException(400, "SHARED_TAGS_SOURCE is not set in .env")
+    return res
+
+
+# ---- digest -----------------------------------------------------------------
+
+@app.get("/api/digest/preview")
+def digest_preview(hours: float | None = None):
+    d = digest.build(hours)
+    d["text"] = digest.render_text(d)
+    return d
+
+
+@app.post("/api/digest/send")
+def digest_send(hours: float | None = None):
+    if not settings.slack_webhook_url:
+        raise HTTPException(400, "SLACK_WEBHOOK_URL is not set in .env")
+    d = digest.send_now(hours)
+    return {"ok": True, "counts": d["counts"]}
 
 
 @app.get("/api/priority-config")

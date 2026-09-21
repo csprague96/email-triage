@@ -42,6 +42,29 @@ class Assessment:
     needs_review: bool = False
     model: str = ""
     input_tokens: int = 0
+    thread: ThreadInfo | None = None
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+@dataclass
+class ThreadMessage:
+    sender_name: str
+    sender_email: str
+    received: datetime
+    from_owner: bool
+    folder: str = ""
+
+
+@dataclass
+class ThreadInfo:
+    messages: int = 0  # total messages seen in the conversation
+    is_latest: bool = True  # this email is the newest message in the thread
+    owner_replied_after: str = ""  # ISO time of the owner's reply that came after this email
+    colleague_replied_after: str = ""  # "Name (ISO time)" of a same-domain reply after this email
+    newer_from: str = ""  # sender name of the newest message if it is not this one
+    note: str = ""  # human readable summary for the dashboard
 
     def to_dict(self) -> dict:
         return asdict(self)

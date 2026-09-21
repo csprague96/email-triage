@@ -11,7 +11,7 @@ import threading
 from datetime import datetime, timedelta, timezone
 from typing import Iterator
 
-from ..models import Email
+from ..models import Email, ThreadMessage
 from ..text import html_to_text, normalize_whitespace, strip_quoted
 from .base import MailBackend
 
@@ -51,18 +51,15 @@ def _ns():
 
 
 def _to_datetime(value) -> datetime:
-    # pywintypes datetimes are tz-aware in recent pywin32; older ones are naive local time.
+    """Outlook COM hands back the wall-clock time in the PC's local zone, but pywin32 labels it
+    as UTC ('GMT Standard Time'). Treat the fields as local time and convert properly."""
     try:
-        dt = datetime(value.year, value.month, value.day, value.hour, value.minute, value.second)
+        naive = datetime(value.year, value.month, value.day, value.hour, value.minute, value.second)
     except Exception:
         return datetime.now(timezone.utc)
-    tz = getattr(value, "tzinfo", None)
-    if tz is not None:
-        try:
-            return datetime(value.year, value.month, value.day, value.hour, value.minute, value.second, tzinfo=tz).astimezone(timezone.utc)
-        except Exception:
-            pass
-    return dt.astimezone(timezone.utc)
+    if naive.year >= 4500:  # Outlook's "no date" sentinel (e.g. SentOn of an unsent draft)
+        return datetime.now(timezone.utc)
+    return naive.astimezone(timezone.utc)  # naive -> system local zone -> UTC
 
 
 def _smtp_of_sender(item) -> str:
@@ -261,6 +258,54 @@ class OutlookBackend(MailBackend):
                 reply.HTMLBody = body_html + existing
             reply.Save()
             return reply.EntryID
+
+    def thread_messages(self, email: Email) -> list[ThreadMessage]:
+        owner_name, owner_email = self.owner()
+        out: list[ThreadMessage] = []
+        with _lock:
+            try:
+                item = _ns().GetItemFromID(email.id)
+                conv = item.GetConversation()
+            except Exception:
+                return out
+            if conv is None:
+                return out
+            try:
+                table = conv.GetTable()
+                for col in ("SenderName", "SenderEmailAddress", "ReceivedTime"):
+                    try:
+                        table.Columns.Add(col)
+                    except Exception:
+                        pass
+                table.MoveToStart()
+                while not table.EndOfTable:
+                    row = table.GetNextRow()
+                    try:
+                        msg_class = row["MessageClass"] or ""
+                        if not msg_class.startswith("IPM.Note"):
+                            continue
+                        entry_id = row["EntryID"]
+                        sub = _ns().GetItemFromID(entry_id)
+                        if not bool(sub.Sent):  # unsent drafts (including our own) are not part of the exchange
+                            continue
+                        sender_email = _smtp_of_sender(sub)
+                        folder = ""
+                        try:
+                            folder = sub.Parent.Name
+                        except Exception:
+                            pass
+                        from_owner = bool(owner_email) and sender_email.lower() == owner_email.lower()
+                        if not from_owner and folder.lower().startswith("sent"):
+                            from_owner = True
+                        stamp = _to_datetime(sub.SentOn if from_owner else sub.ReceivedTime)
+                        out.append(ThreadMessage(sender_name=sub.SenderName or "", sender_email=sender_email,
+                                                 received=stamp, from_owner=from_owner, folder=folder))
+                    except Exception:
+                        continue
+            except Exception:
+                return out
+        out.sort(key=lambda m: m.received)
+        return out
 
     def delete_draft(self, draft_id: str) -> None:
         with _lock:
