@@ -47,5 +47,9 @@ Write-Host "Learning your writing style from Sent Items (stays on this PC)..." -
 & $venvPy -m emailtriage learn-style
 
 Write-Host ""
-Write-Host "Done. Start the dashboard any time with start.cmd" -ForegroundColor Green
+Write-Host "Installing the background job (runs at logon, restarts itself)..." -ForegroundColor Cyan
+& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "install-background.ps1")
+
+Write-Host ""
+Write-Host "Done. Open the dashboard any time with start.cmd" -ForegroundColor Green
 Write-Host "Tip: run '.venv\Scripts\python -m emailtriage sample --hours 24' to preview decisions without saving anything."
