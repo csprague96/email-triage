@@ -1,5 +1,5 @@
 // Settings: account, triage behaviour, digest & Slack, tags, priorities, drafting prompt, appearance.
-import { $, $$, api, bus, esc, fmtTime, icon, on, PRIORITIES, pill, store, toast } from '../ui.js';
+import { $, $$, api, bus, cap, esc, fmtTime, icon, on, PRIORITIES, pill, store, toast } from '../ui.js';
 import { navigate, refreshStatus, setTheme, themePref, checkInbox } from '../app.js';
 
 const SECTIONS = [
@@ -20,7 +20,7 @@ export async function render(el, route) {
   const section = SECTIONS.some(([id]) => id === route.sub) ? route.sub : 'account';
   root.innerHTML = `<div class="settings">
     <nav class="subnav">${SECTIONS.map(([id, label]) => `<a href="#/settings/${id}" class="${id === section ? 'active' : ''}">${label}</a>`).join('')}</nav>
-    <div class="form" id="pane"><p class="muted">Loading…</p></div></div>`;
+    <div class="form" id="pane"><p class="muted">Loading</p></div></div>`;
   try { settings = await api('/settings'); } catch (e) { $('#pane', root).innerHTML = `<p>${esc(e.message)}</p>`; return; }
   await ({ account, triage, digest, tags, priorities, drafting, appearance })[section]($('#pane', root));
   return () => { root = null; };
@@ -178,7 +178,7 @@ async function digest(pane) {
     </div>
     <div class="card pad">
       <div class="row between"><h3>Preview</h3><div class="row"><button class="btn sm" data-preview>${icon('refresh')}Refresh</button><button class="btn sm primary" data-send ${s.slack_configured ? '' : 'disabled'}>${icon('slack')}Send to Slack now</button></div></div>
-      <pre class="preview" id="digestPreview">Loading…</pre>
+      <pre class="preview" id="digestPreview">Loading</pre>
     </div>`;
   wireForm(pane);
   const preview = async () => { try { const d = await api('/digest/preview'); $('#digestPreview', pane).textContent = d.text; } catch (e) { $('#digestPreview', pane).textContent = e.message; } };
@@ -207,7 +207,7 @@ async function tags(pane) {
           </div>`).join('')}
         </div>
         <div class="row between">
-          <button class="btn" data-add>+ Add tag</button>
+          <button class="btn" data-add>${icon('plus')}Add tag</button>
           <label class="field" style="grid-template-columns:auto auto;align-items:center;gap:10px;display:flex">Default threshold <input type="number" id="defTh" min="0.1" max="0.99" step="0.05" value="${conf.default_threshold ?? 0.6}" style="width:90px"></label>
         </div>
         <div class="actions"><button class="btn primary" data-savetags>Save tags</button></div>
@@ -222,7 +222,7 @@ async function tags(pane) {
           <span class="hint">${conf.shared_source ? (conf.shared_error ? `Last sync failed: ${esc(conf.shared_error)}` : `${shared.length} shared tag${shared.length === 1 ? '' : 's'}${conf.shared_synced_at ? `, synced ${esc(fmtTime(conf.shared_synced_at))}` : ''}`) : 'Not configured'}</span>
           <div class="row"><button class="btn sm" data-sync ${conf.shared_source ? '' : 'disabled'}>${icon('refresh')}Sync now</button><button class="btn sm primary" data-save="shared">Save</button></div>
         </div>
-        ${shared.length ? `<div class="list">${shared.map((t) => `<div class="rowitem" style="cursor:default;grid-template-columns:auto 1fr"><span class="tag" style="--tag-color:${esc(t.color || '#64748b')}">${esc(t.name)}</span><span class="muted small">${esc(t.description)}</span></div>`).join('')}</div>` : ''}
+        ${shared.length ? `<div class="list">${shared.map((t) => `<div class="rowitem static"><span class="tag" style="--tag-color:${esc(t.color || '#64748b')}"><i></i>${esc(t.name)}</span><span class="muted small">${esc(t.description)}</span></div>`).join('')}</div>` : ''}
       </div>`;
   };
   draw();
@@ -239,7 +239,7 @@ async function tags(pane) {
   on(pane, 'click', '[data-add]', () => { collectTags(); conf.tags.push({ name: '', description: '', shared: false, color: '#' + Math.floor(Math.random() * 0xffffff).toString(16).padStart(6, '0') }); draw(); $$('.tagedit [data-f=name]', pane).pop()?.focus(); });
   on(pane, 'click', '[data-del]', (_, b) => { collectTags(); const local = conf.tags.filter((t) => !t.shared); local.splice(+b.dataset.del, 1); conf.tags = conf.tags.filter((t) => t.shared).concat(local); draw(); });
   on(pane, 'click', '[data-savetags]', async () => { collectTags(); try { conf = await api('/tags', { method: 'PUT', body: conf }); bus.emit('tags-changed'); toast('Tags saved', { kind: 'ok' }); draw(); } catch (e) { toast(e.message, { kind: 'error', ms: 6000 }); } });
-  on(pane, 'click', '[data-sync]', async () => { toast('Syncing…'); try { const r = await api('/tags/sync', { method: 'POST' }); toast(r.error ? 'Sync failed: ' + r.error : `Synced ${r.tags} shared tags`, { kind: r.error ? 'error' : 'ok', ms: 5000 }); conf = await api('/tags'); bus.emit('tags-changed'); draw(); } catch (e) { toast(e.message, { kind: 'error' }); } });
+  on(pane, 'click', '[data-sync]', async () => { toast('Syncing'); try { const r = await api('/tags/sync', { method: 'POST' }); toast(r.error ? 'Sync failed: ' + r.error : `Synced ${r.tags} shared tags`, { kind: r.error ? 'error' : 'ok', ms: 5000 }); conf = await api('/tags'); bus.emit('tags-changed'); draw(); } catch (e) { toast(e.message, { kind: 'error' }); } });
 }
 
 // ---- Priorities ---------------------------------------------------------------------
@@ -275,7 +275,7 @@ async function drafting(pane) {
     <div class="card pad">
       <h3>When to draft</h3>
       <p class="hint">A reply is drafted automatically when an email lands at one of these priorities, needs a reply, and the thread has not moved on. You can always ask for a draft from any email.</p>
-      <div class="chips">${PRIORITIES.slice().reverse().map((p) => `<button class="chip ${wanted.includes(p) ? 'on' : ''}" data-dp="${p}">${p}</button>`).join('')}</div>
+      <div class="chips">${PRIORITIES.slice().reverse().map((p) => `<button class="chip ${wanted.includes(p) ? 'on' : ''}" data-dp="${p}" aria-pressed="${wanted.includes(p)}">${cap(p)}</button>`).join('')}</div>
       <input type="hidden" data-key="DRAFT_FOR_PRIORITIES" value="${esc(wanted.join(','))}">
       ${field('OPENAI_MODEL', 'Model', { hint: 'The OpenAI model that writes drafts. gpt-5.4-mini is fast and cheap; a bigger model is rarely worth it for short emails.' })}
       ${saveBar()}
@@ -306,7 +306,7 @@ async function drafting(pane) {
       <label class="field">Revision prompt <span class="hint">used when Jev's checks flag the first attempt; <code>{problems}</code> is the list of issues</span><textarea id="revPrompt" class="code" style="min-height:110px">${esc(d.revision_prompt)}</textarea></label>
       <label class="field">Phrases to avoid <span class="hint">one per line, case-insensitive. A draft containing any of these gets a revision pass.</span><textarea id="banned" class="code" style="min-height:160px">${esc(d.banned_phrases.join('\n'))}</textarea></label>
       <div class="actions">
-        <button class="btn ghost" data-preview-prompt>${icon('sparkle')}Show what the model sees</button>
+        <button class="btn ghost" data-preview-prompt>${icon('eye')}Preview full prompt</button>
         <button class="btn ghost danger" data-resetprompt ${d.is_default ? 'disabled' : ''}>Reset to default</button>
         <button class="btn primary" data-saveprompt>Save prompt</button>
       </div>
@@ -314,12 +314,12 @@ async function drafting(pane) {
     </div>`;
   on(pane, 'click', '[data-dp]', (_, b) => { b.classList.toggle('on'); $('[data-key=DRAFT_FOR_PRIORITIES]', pane).value = $$('[data-dp].on', pane).map((x) => x.dataset.dp).join(','); $('[data-dirty]', pane)?.classList.remove('hidden'); });
   wireForm(pane);
-  on(pane, 'click', '[data-relearn]', async (_, b) => { b.disabled = true; const t = toast('Reading your Sent Items…', { ms: 60000 }); try { const r = await api('/style/learn', { method: 'POST' }); t.remove(); toast(`Learned from ${r.emails_analysed} emails`, { kind: 'ok' }); render(root, { sub: 'drafting', params: {} }); } catch (e) { t.remove(); toast(e.message, { kind: 'error', ms: 6000 }); b.disabled = false; } });
+  on(pane, 'click', '[data-relearn]', async (_, b) => { b.disabled = true; const t = toast('Reading your Sent Items', { ms: 60000 }); try { const r = await api('/style/learn', { method: 'POST' }); t.remove(); toast(`Learned from ${r.emails_analysed} emails`, { kind: 'ok' }); render(root, { sub: 'drafting', params: {} }); } catch (e) { t.remove(); toast(e.message, { kind: 'error', ms: 6000 }); b.disabled = false; } });
   on(pane, 'click', '[data-savenotes]', async () => { try { await api('/style/notes', { method: 'PUT', body: { extra_instructions: $('#styleNotes', pane).value } }); toast('Saved', { kind: 'ok' }); } catch (e) { toast(e.message, { kind: 'error' }); } });
   const promptBody = () => ({ system_prompt: $('#sysPrompt', pane).value, revision_prompt: $('#revPrompt', pane).value, banned_phrases: $('#banned', pane).value.split('\n').map((x) => x.trim()).filter(Boolean) });
   on(pane, 'click', '[data-saveprompt]', async () => { try { await api('/drafting', { method: 'PUT', body: promptBody() }); toast('Prompt saved. Next draft uses it.', { kind: 'ok' }); render(root, { sub: 'drafting', params: {} }); } catch (e) { toast(e.message, { kind: 'error', ms: 8000 }); } });
   on(pane, 'click', '[data-resetprompt]', async () => { if (!confirm('Reset the prompt, revision prompt and phrase list to the defaults?')) return; await api('/drafting/reset', { method: 'POST' }); toast('Reset to default'); render(root, { sub: 'drafting', params: {} }); });
-  on(pane, 'click', '[data-preview-prompt]', async () => { const pre = $('#promptPreview', pane); pre.classList.remove('hidden'); pre.textContent = 'Building…'; try { const r = await api('/drafting/preview'); pre.textContent = r.instructions; } catch (e) { pre.textContent = e.message; } });
+  on(pane, 'click', '[data-preview-prompt]', async () => { const pre = $('#promptPreview', pane); pre.classList.remove('hidden'); pre.textContent = 'Building preview'; try { const r = await api('/drafting/preview'); pre.textContent = r.instructions; } catch (e) { pre.textContent = e.message; } });
 }
 
 // ---- Appearance ---------------------------------------------------------------------
@@ -329,7 +329,7 @@ async function appearance(pane) {
     <div class="card pad">
       <h3>Theme</h3>
       <div class="theme-options">
-        ${[['system', 'Match system'], ['light', 'Light'], ['dark', 'Dark']].map(([v, l]) => `<button class="theme-option ${pref === v ? 'on' : ''}" data-theme="${v}"><span class="swatch ${v}"></span>${l}</button>`).join('')}
+        ${[['system', 'Match system'], ['light', 'Light'], ['dark', 'Dark']].map(([v, l]) => `<button class="theme-option ${pref === v ? 'on' : ''}" data-theme="${v}"><span class="swatch ${v}" aria-hidden="true"><span></span><span></span></span>${l}</button>`).join('')}
       </div>
       <p class="hint">Saved in this browser. Press <kbd>t</kbd> anywhere to cycle.</p>
     </div>
@@ -338,11 +338,12 @@ async function appearance(pane) {
       <div class="kbd-list">
         <span><kbd>j</kbd> <kbd>k</kbd></span><span>Move between emails</span>
         <kbd>Enter</kbd><span>Open the selected email</span>
-        <kbd>h</kbd><span>Mark handled</span>
+        <kbd>h</kbd><span>Mark done</span>
         <kbd>o</kbd><span>Open in Outlook</span>
         <kbd>Esc</kbd><span>Close the panel</span>
         <span><kbd>1</kbd> … <kbd>4</kbd></span><span>Today, Inbox, Drafts, Settings</span>
         <kbd>r</kbd><span>Check the inbox now</span>
+        <kbd>t</kbd><span>Cycle the theme</span>
         <kbd>?</kbd><span>Show shortcuts</span>
       </div>
     </div>`;

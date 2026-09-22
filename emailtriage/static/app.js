@@ -50,6 +50,7 @@ async function route() {
   renderSidebar();
   renderTopbar();
   const host = $('#view');
+  host.classList.toggle('wide', r.view === 'inbox' || r.view === 'settings');
   const root = document.createElement('div');
   root.className = 'view-root';
   host.replaceChildren(root);
@@ -70,41 +71,38 @@ function renderSidebar() {
     if (n.id === 'drafts' && s.ready_drafts) count = `<span class="count">${s.ready_drafts}</span>`;
     return `<a href="#/${n.id}" class="${current?.view === n.id ? 'active' : ''}">${icon(n.icon)}<span>${n.label}</span>${count}</a>`;
   }).join('');
-  const dot = (ok) => `<span class="dot ${ok ? '' : 'bad'}"></span>`;
   $('#sidebar').innerHTML = `
     <div class="brand"><span class="logo">${icon('mail')}</span><span>Email Triage</span></div>
     <nav class="nav">${items}</nav>
-    <div class="foot">
-      <div class="statusline">${dot(s.backend_ok)}<span>${s.backend_ok ? 'Mailbox connected' : 'Mailbox offline'}</span></div>
-      <div class="statusline">${dot(s.jev_configured)}<span>Jev ${s.jev_configured ? 'ready' : 'not set up'}</span></div>
-      <div class="statusline"><span class="dot ${s.watcher_alive ? '' : 'off'}"></span><span>${s.watcher_alive ? `Checking every ${Math.round((s.poll_seconds || 120) / 60)} min` : 'Watcher not running here'}</span></div>
-      <div class="statusline" style="color:var(--muted)">v${esc(s.version || '')}</div>
-    </div>`;
+    <div class="foot" title="Version ${esc(s.version || '')}">${statusLine(s)}</div>`;
+}
+
+// One line: the first thing that is wrong, or that all is well.
+function statusLine(s) {
+  if (store.unreachable) return '<div class="statusline"><span class="dot bad"></span>Server unreachable</div>';
+  if (!store.status) return '';
+  if (!s.backend_ok) return '<div class="statusline"><span class="dot bad"></span><a href="#/settings/account">Mailbox offline</a></div>';
+  if (!s.jev_configured) return '<div class="statusline"><span class="dot bad"></span><a href="#/settings/account">Jev not set up</a></div>';
+  if (!s.watcher_alive) return '<div class="statusline"><span class="dot off"></span>Watcher not running here</div>';
+  return `<div class="statusline"><span class="dot"></span>Checks every ${Math.round((s.poll_seconds || 120) / 60)} min</div>`;
 }
 
 function renderTopbar() {
   const s = store.status || {};
   const title = { today: 'Today', inbox: 'Inbox', drafts: 'Drafts', settings: 'Settings' }[current?.view || 'today'];
-  const pref = themePref();
-  const themeIcon = pref === 'system' ? 'monitor' : pref === 'dark' ? 'moon' : 'sun';
   const name = s.owner_name || store.auth?.name || store.auth?.account || '';
   $('#topbar').innerHTML = `
     <span class="title">${title}</span>
     <span class="spacer"></span>
     <button class="btn ghost sm" data-act="check" title="Check the inbox now">${icon('refresh')}<span class="hide-sm">Check inbox</span></button>
-    <button class="btn ghost icon" data-act="theme" title="Theme: ${pref}. Click to change." aria-label="Change theme">${icon(themeIcon)}</button>
     <button class="btn ghost icon" data-act="help" title="Keyboard shortcuts (?)" aria-label="Keyboard shortcuts">${icon('keyboard')}</button>
     <div class="account">
-      <button class="btn ghost sm" data-act="account" aria-haspopup="menu"><span class="avatar" style="width:28px;height:28px;font-size:.72rem">${esc(initials(name, s.owner_email))}</span><span class="hide-sm">${esc(firstName(name) || 'Account')}</span></button>
+      <button class="btn ghost sm" data-act="account" aria-haspopup="menu"><span class="avatar">${esc(initials(name, s.owner_email))}</span><span class="hide-sm">${esc(firstName(name) || 'Account')}</span></button>
     </div>`;
 }
 on($('#topbar'), 'click', '[data-act]', async (ev, el) => {
   const act = el.dataset.act;
-  if (act === 'theme') {
-    const next = { system: 'light', light: 'dark', dark: 'system' }[themePref()];
-    setTheme(next);
-    toast(`Theme: ${next}`);
-  } else if (act === 'check') {
+  if (act === 'check') {
     await checkInbox();
   } else if (act === 'help') {
     toggleHelp();
@@ -141,7 +139,7 @@ function toggleAccountMenu(host) {
 }
 
 export async function checkInbox(hours) {
-  const t = toast(hours ? `Triaging the last ${hours} hours. This can take a minute…` : 'Checking the inbox…', { ms: 60000 });
+  const t = toast(hours ? `Triaging the last ${hours} hours. This can take a minute.` : 'Checking the inbox', { ms: 60000 });
   try {
     const r = await api('/run', { method: 'POST', body: hours ? { hours, limit: 400 } : {} });
     t.remove();
@@ -168,26 +166,25 @@ function renderGate(root) {
           <a class="btn primary" href="${esc(a.pending.verification_uri)}" target="_blank" rel="noopener">${icon('open')} Open microsoft.com/devicelogin</a>
           <button class="btn" data-act="copycode">${icon('copy')} Copy code</button>
         </div>
-        <p class="muted small">Waiting for Microsoft…</p>`;
+        <p class="muted small">Waiting for Microsoft</p>`;
     } else {
       body = `<h1>Sign in with Microsoft</h1>
-        <p class="muted">Email Triage reads your Microsoft 365 mailbox through the Graph API. You sign in once; the token stays on this PC. Nothing is ever sent or deleted on your behalf.</p>
+        <p class="muted">Sign in once. The token stays on this PC, and nothing is ever sent or deleted for you.</p>
         ${a.error ? `<div class="error">${esc(a.error)}</div>` : ''}
         <div class="row"><button class="btn primary" data-act="connect">Sign in with Microsoft</button><a class="btn ghost" href="#/settings/account">Use classic Outlook instead</a></div>`;
     }
   } else {
     body = `<h1>Connect Outlook</h1>
-      <p class="muted">Email Triage reads the mailbox that classic Outlook on this PC is already signed in to. No password needed. It only adds categories and saves drafts; nothing is sent, moved or deleted.</p>
+      <p class="muted">Uses the mailbox classic Outlook is already signed in to. It adds categories and saves drafts. Nothing is sent, moved or deleted.</p>
       ${a.error ? `<div class="error">${esc(a.error)}</div>` : ''}
       <div class="row"><button class="btn primary" data-act="connect">Connect to Outlook</button><a class="btn ghost" href="#/settings/account">Sign in with Microsoft 365 instead</a></div>
-      <p class="muted small">Not working? Classic Outlook must be installed and open. The "new Outlook" app cannot be read this way; use Microsoft 365 sign-in for it.</p>`;
+      <p class="muted small">Classic Outlook must be open. For the new Outlook app, use Microsoft 365 sign-in.</p>`;
   }
-  root.innerHTML = `<div class="gate"><div class="card">
-    <div class="logo-big">${icon('mail')}</div>${body}</div></div>`;
+  root.innerHTML = `<div class="gate"><div class="card">${body}</div></div>`;
   on(root, 'click', '[data-act]', async (_, el) => {
     if (el.dataset.act === 'copycode') { navigator.clipboard.writeText($('#devcode').textContent); toast('Code copied'); }
     if (el.dataset.act === 'connect') {
-      el.disabled = true; el.textContent = 'Connecting…';
+      el.disabled = true; el.textContent = 'Connecting';
       try {
         store.auth = await api('/auth/connect', { method: 'POST' });
         if (store.auth.signed_in) { toast('Connected', { kind: 'ok' }); await refreshStatus(); }
@@ -214,13 +211,15 @@ export async function refreshStatus() {
     const [status, auth] = await Promise.all([api('/status'), api('/auth')]);
     store.status = status;
     store.auth = auth;
+    store.unreachable = false;
     if (!store.tags) store.tags = await api('/tags');
     renderSidebar();
     renderTopbar();
     bus.emit('status', status);
   } catch (e) {
     store.status = store.status || {};
-    $('#sidebar .foot')?.insertAdjacentHTML('afterbegin', '<div class="statusline"><span class="dot bad"></span>Server unreachable</div>');
+    store.unreachable = true;
+    renderSidebar();
   }
 }
 bus.on('today-counts', (c) => { store.todayCounts = c; renderSidebar(); });
@@ -235,13 +234,13 @@ function toggleHelp() {
     <div class="kbd-list">
       <span><kbd>j</kbd> <kbd>k</kbd></span><span>Move between emails</span>
       <kbd>Enter</kbd><span>Open the selected email</span>
-      <kbd>h</kbd><span>Mark the selected email handled</span>
+      <kbd>h</kbd><span>Mark the selected email done</span>
       <kbd>o</kbd><span>Open the selected email in Outlook</span>
       <kbd>Esc</kbd><span>Close the panel</span>
       <span><kbd>1</kbd> … <kbd>4</kbd></span><span>Today, Inbox, Drafts, Settings</span>
       <kbd>r</kbd><span>Check the inbox now</span>
       <kbd>t</kbd><span>Cycle the theme</span>
-      <kbd>?</kbd><span>This list</span>
+      <kbd>?</kbd><span>Show shortcuts</span>
     </div></div>`;
   h.classList.remove('hidden');
   h.onclick = (e) => { if (e.target === h || e.target.closest('[data-close]')) h.classList.add('hidden'); };

@@ -14,7 +14,7 @@ export const store = {
   auth: null,
   tagColor(name) {
     const t = (this.tags?.tags || []).find((x) => x.name === name);
-    return t?.color || '#64748b';
+    return t?.color || 'var(--muted)';
   },
 };
 
@@ -53,11 +53,21 @@ export async function api(path, { method = 'GET', body, query } = {}) {
 }
 
 // ---- toasts ---------------------------------------------------------------------
-export function toast(msg, { kind = '', ms = 3200 } = {}) {
+// action: { label, onClick } adds one button to the toast, e.g. Undo.
+export function toast(msg, { kind = '', ms = 3200, action } = {}) {
   const box = $('#toasts');
   const el = document.createElement('div');
   el.className = 'toast ' + kind;
-  el.textContent = msg;
+  el.setAttribute('role', kind === 'error' ? 'alert' : 'status');
+  const text = document.createElement('span');
+  text.textContent = msg;
+  el.appendChild(text);
+  if (action) {
+    const b = document.createElement('button');
+    b.textContent = action.label;
+    b.onclick = () => { el.remove(); action.onClick(); };
+    el.appendChild(b);
+  }
   box.appendChild(el);
   setTimeout(() => el.remove(), ms);
   return el;
@@ -95,6 +105,7 @@ export function snippet(text, n = 160) {
 export function firstName(name) {
   return (name || '').split(/\s+/)[0] || '';
 }
+export const cap = (s) => { s = String(s || ''); return s.charAt(0).toUpperCase() + s.slice(1); };
 export const debounce = (fn, ms = 250) => { let h; return (...a) => { clearTimeout(h); h = setTimeout(() => fn(...a), ms); }; };
 
 // Plain-language reasons an email landed where it did, built from Jev's signals. No numbers unless useful.
@@ -111,7 +122,7 @@ export function whyList(e) {
   if (s.external_business >= 0.6) out.push('External partner or customer');
   if (s.recipient_only_copied >= 0.7) out.push('You are only copied');
   if (s.automated >= 0.7) out.push('Automated notification');
-  if (e.user_priority) out.push('Priority set by you');
+  if (e.user_priority) out.push('You set this priority');
   else if (e.needs_review) out.push(`Jev was unsure (${Math.round((e.confidence || 0) * 100)}% confident)`);
   return out;
 }
@@ -120,23 +131,21 @@ export function whyLine(e, max = 3) {
 }
 
 // ---- small components ------------------------------------------------------------
-export const pill = (p) => `<span class="pill" data-p="${esc(p)}">${esc(p)}</span>`;
-export const tagChip = (name, ghost = false) => `<span class="tag ${ghost ? 'ghost' : ''}" style="--tag-color:${esc(store.tagColor(name))}">${esc(name)}</span>`;
+export const pill = (p) => `<span class="pill" data-p="${esc(p)}">${esc(cap(p))}</span>`;
+export const tagChip = (name) => `<span class="tag" style="--tag-color:${esc(store.tagColor(name))}"><i></i>${esc(name)}</span>`;
 export const avatar = (name, email) => `<span class="avatar" aria-hidden="true">${esc(initials(name, email))}</span>`;
 
+// One line per email: who, what, when. Read state is shown by weight, not an extra marker.
 export function rowItem(e, { showHandled = true } = {}) {
   const flags = [];
-  if (e.ready_drafts) flags.push('<span class="flag draft">draft ready</span>');
-  if (e.needs_review && !e.user_priority) flags.push('<span class="flag review">unsure</span>');
-  if (showHandled && e.handled_at) flags.push('<span class="flag">handled</span>');
-  const tags = (e.tags || []).slice(0, 3).map((t) => tagChip(t)).join('');
+  if (e.ready_drafts) flags.push('<span class="badge ok">Draft ready</span>');
+  if (e.needs_review && !e.user_priority) flags.push('<span class="badge warn">Unsure</span>');
+  if (showHandled && e.handled_at) flags.push('<span class="badge">Done</span>');
+  const from = e.sender_name || e.sender_email;
   return `<div class="rowitem ${e.handled_at ? 'handled' : ''}" data-id="${esc(e.id)}" data-p="${esc(e.priority)}" role="button" tabindex="0">
-    <span class="pdot" title="${esc(e.priority)}"></span>
-    <span class="from ${e.is_read ? '' : 'unread'}" title="${esc(e.sender_email)}">${esc(e.sender_name || e.sender_email)}</span>
-    <span class="mid">
-      <div class="subj" data-from="${esc(e.sender_name || e.sender_email)}">${esc(e.subject || '(no subject)')}</div>
-      <div class="sub">${tags}<span>${esc(snippet(e.body_text, 120))}</span></div>
-    </span>
+    <span class="pdot" title="${esc(cap(e.priority))}"></span>
+    <span class="from ${e.is_read ? '' : 'unread'}" title="${esc(e.sender_email)}">${esc(from)}</span>
+    <span class="mid"><span class="subj" data-from="${esc(from)}">${esc(e.subject || '(no subject)')}</span><span class="snip">${esc(snippet(e.body_text, 120))}</span></span>
     <span class="right">${flags.join('')}<span>${esc(fmtTime(e.received))}</span></span>
   </div>`;
 }
@@ -172,6 +181,7 @@ const I = {
   more: '<circle cx="5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="19" cy="12" r="1.6"/>',
   mail: '<rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 7l9 6 9-6"/>',
   undo: '<path d="M9 14L4 9l5-5"/><path d="M4 9h11a5 5 0 0 1 0 10h-3"/>',
+  plus: '<path d="M12 5v14M5 12h14"/>',
   sparkle: '<path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8L12 3z"/><path d="M19 17l.8 2.2L22 20l-2.2.8L19 23l-.8-2.2L16 20l2.2-.8L19 17z"/>',
   slack: '<path d="M9 3a2 2 0 0 0 0 4h2V5a2 2 0 0 0-2-2zM15 21a2 2 0 0 0 0-4h-2v2a2 2 0 0 0 2 2zM3 15a2 2 0 0 0 4 0v-2H5a2 2 0 0 0-2 2zM21 9a2 2 0 0 0-4 0v2h2a2 2 0 0 0 2-2z"/><path d="M9 9h6v6H9z"/>',
   keyboard: '<rect x="2" y="6" width="20" height="12" rx="2"/><path d="M6 10h.01M10 10h.01M14 10h.01M18 10h.01M8 14h8"/>',
@@ -179,5 +189,5 @@ const I = {
   eye: '<path d="M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6S2 12 2 12z"/><circle cx="12" cy="12" r="3"/>',
 };
 export function icon(name, cls = '') {
-  return `<svg class="${cls}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${I[name] || ''}</svg>`;
+  return `<svg class="${cls}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${I[name] || ''}</svg>`;
 }

@@ -1,5 +1,5 @@
 // Drafts: replies written in your voice, waiting in Outlook Drafts for you to read and send.
-import { $, api, bus, esc, fmtTime, icon, on, pill, snippet } from '../ui.js';
+import { $, api, bus, cap, esc, fmtTime, icon, on } from '../ui.js';
 import { openDetail, wireDraftButtons } from '../detail.js';
 
 let root = null;
@@ -8,10 +8,10 @@ let status = 'ready';
 export async function render(el) {
   root = el;
   root.innerHTML = `
-    <p class="muted" style="max-width:720px;margin-bottom:16px">Each draft is saved in your Outlook Drafts folder as a real reply to the original email, quoted thread and signature included. Open it, read it, edit, send. Nothing is ever sent for you.</p>
+    <p class="muted" style="margin-bottom:16px">Saved in Outlook as replies. Open one, edit, and send it yourself.</p>
     <div class="toolbar">
       <div class="seg" id="statusSeg">
-        ${[['ready', 'Ready to review'], ['opened', 'Opened'], ['done', 'Done'], ['superseded', 'Superseded'], ['discarded', 'Discarded'], ['all', 'All']].map(([v, l]) => `<button data-s="${v}" class="${v === status ? 'on' : ''}">${l}</button>`).join('')}
+        ${[['ready', 'Ready'], ['opened', 'Opened'], ['done', 'Done'], ['all', 'All']].map(([v, l]) => `<button data-s="${v}" class="${v === status ? 'on' : ''}">${l}</button>`).join('')}
       </div>
     </div>
     <div id="dlist"></div>`;
@@ -29,21 +29,21 @@ async function load() {
   let rows;
   try { rows = await api('/drafts', { query: { status } }); } catch (e) { list.innerHTML = `<div class="empty"><p>${esc(e.message)}</p></div>`; return; }
   if (!rows.length) {
-    list.innerHTML = `<div class="empty"><div class="big">✎</div><h3>No drafts ${status === 'ready' ? 'waiting' : 'here'}</h3><p>${status === 'ready' ? 'Drafts are written automatically for urgent and high-priority mail that needs a reply. You can also ask for one from any email\'s details.' : ''}</p></div>`;
+    list.innerHTML = `<div class="empty"><h3>${status === 'ready' ? 'No drafts ready' : 'No drafts here'}</h3>${status === 'ready' ? '<p>Drafts are written for urgent and high-priority mail that needs a reply. You can also draft from any email.</p>' : ''}</div>`;
     return;
   }
   list.innerHTML = rows.map((d) => `
-    <div class="draft ${d.passed ? '' : 'failed'}" data-draft="${d.id}">
-      <div class="meta">${pill(d.priority || 'medium')}<b>${esc(d.subject)}</b><span>to ${esc(d.sender_name || d.sender_email)}</span><span>${esc(fmtTime(d.created_at))}</span><span>${esc(d.status)}</span>${d.passed ? '<span style="color:var(--ok)">passed checks</span>' : '<span style="color:var(--warn)">checks flagged</span>'}</div>
+    <div class="draft" data-draft="${d.id}">
+      <div class="meta"><b>${esc(d.subject)}</b><span>To ${esc(d.sender_name || d.sender_email)} · ${esc(fmtTime(d.created_at))}</span>${d.status === 'ready' ? '' : `<span class="badge">${esc(cap(d.status))}</span>`}${d.passed ? '' : '<span class="badge warn">Check before sending</span>'}</div>
       <pre>${esc(d.body_text)}</pre>
       ${d.notes ? `<div class="notes">${esc(d.notes)}</div>` : ''}
       <div class="row">
-        ${d.outlook_draft_id ? `<button class="btn sm primary" data-dact="open">${icon('open')}Open in Outlook</button>` : '<span class="muted small">not saved to the mailbox</span>'}
+        ${d.outlook_draft_id ? `<button class="btn sm primary" data-dact="open">${icon('open')}Open in Outlook</button>` : '<span class="muted small">Not saved to Outlook</span>'}
         <button class="btn sm" data-dact="copy">${icon('copy')}Copy</button>
-        ${d.status === 'ready' || d.status === 'opened' ? `<button class="btn sm ok" data-dact="done">${icon('check')}Done</button>` : ''}
+        ${d.status === 'ready' || d.status === 'opened' ? `<button class="btn sm" data-dact="done">${icon('check')}Mark done</button>` : ''}
+        <span class="spacer"></span>
+        <button class="btn sm ghost" data-view="${esc(d.email_id)}">View email</button>
         ${d.status !== 'discarded' ? '<button class="btn sm ghost danger" data-dact="discard">Discard</button>' : ''}
-        <span style="flex:1"></span>
-        <button class="btn sm ghost" data-view="${esc(d.email_id)}">View email ${icon('chev')}</button>
       </div>
     </div>`).join('');
 }
