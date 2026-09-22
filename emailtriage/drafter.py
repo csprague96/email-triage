@@ -11,27 +11,17 @@ import html as htmllib
 import re
 
 from . import jev
-from .config import load_style, settings
+from .config import load_drafting, load_style, settings
 from .models import DraftResult, Email
+from .prompts import DEFAULT_BANNED_PHRASES, DEFAULT_REVISION_PROMPT, DEFAULT_SYSTEM_PROMPT
 from .style import describe
 from .text import truncate
 
-# Distilled from Wikipedia's "Signs of AI writing" plus common email boilerplate.
-BANNED_PHRASES = [
-    "i hope this email finds you well", "i hope this finds you well", "i hope you are doing well", "i hope you're doing well",
-    "i wanted to reach out", "i wanted to touch base", "just wanted to follow up", "i appreciate your patience",
-    "thank you for your patience", "please don't hesitate", "please do not hesitate", "feel free to reach out",
-    "i understand your frustration", "i completely understand", "rest assured", "i apologize for any inconvenience",
-    "apologies for any inconvenience", "at your earliest convenience", "moving forward", "going forward",
-    "to ensure", "in order to", "it's important to note", "it is important to note", "it's worth noting",
-    "as a valued", "we value", "i'd be happy to", "i would be happy to", "happy to help", "absolutely",
-    "great question", "thank you for bringing this to", "thank you for reaching out", "thanks for reaching out",
-    "i'm reaching out", "circle back", "touch base", "leverage", "streamline", "seamless", "robust",
-    "delve", "crucial", "pivotal", "landscape", "tapestry", "testament", "underscore", "highlights the",
-    "showcase", "foster", "enhance", "align with", "vibrant", "meticulous", "navigate", "journey", "empower",
-    "not just", "not only", "it's not about", "rather than simply", "additionally,", "furthermore,", "moreover,",
-    "in conclusion", "to summarize", "in summary", "overall,", "ultimately,", "best regards", "warm regards", "kind regards",
-]
+# Kept for backwards compatibility; the live list comes from config/drafting.json (Settings > Drafting).
+BANNED_PHRASES = DEFAULT_BANNED_PHRASES
+SYSTEM_PROMPT = DEFAULT_SYSTEM_PROMPT
+REVISION_PROMPT = DEFAULT_REVISION_PROMPT
+
 BANNED_REGEX = [
     (re.compile(r"—"), "em dash"),
     (re.compile(r"\bnot (?:just|only) \w+[^.]{0,60}\bbut (?:also )?\b", re.I), "not X but Y framing"),
@@ -39,36 +29,12 @@ BANNED_REGEX = [
     (re.compile(r"[\U0001F300-\U0001FAFF☀-➿]"), "emoji"),
 ]
 
-SYSTEM_PROMPT = """You draft email replies on behalf of {owner_name}. The reply must read as if {owner_name} typed it quickly between meetings, not as if an assistant wrote it.
-
-How {owner_name} writes:
-{style_brief}
-
-Real examples of {owner_name}'s emails (match this register exactly):
-{samples}
-
-Hard rules:
-- Answer only what the sender actually asked or needs. No recap of their message, no preamble about the email itself.
-- Plain sentences. No headings, bold, markdown, emoji, or em dashes. Bullets only if the sender asked several distinct questions.
-- Never invent facts, dates, numbers, decisions, or promises. If you would need information {owner_name} has not given you, write a short placeholder in square brackets, like [confirm date] or [add ticket link]. Keep placeholders rare and short.
-- Do not use these phrases or their cousins: {banned_sample}.
-- Do not open with thanks for reaching out, hope you are well, or an apology unless the thread really calls for one.
-- Do not close with an offer of further help or a summary. A sign-off like the ones above is enough.
-- Do not write a name, title, or signature after the sign-off. It is added automatically.
-- Keep it to roughly the typical length. A one-line reply is fine when that is what a person would send.
-- Match the sender's first-name form of address ("Hi Hutch," if they signed as Hutch).
-
-Output only the email body text, starting with the greeting."""
-
-REVISION_PROMPT = """Your previous draft was checked and needs another pass. Problems found:
-{problems}
-
-Rewrite the reply fixing those problems while keeping everything else. Output only the email body text."""
 
 
-def _lint(text: str) -> list[str]:
+
+def _lint(text: str, phrases: list[str] | None = None) -> list[str]:
     low = text.lower()
-    hits = [p for p in BANNED_PHRASES if p in low]
+    hits = [p for p in (phrases if phrases is not None else load_drafting()["banned_phrases"]) if p in low]
     for rx, label in BANNED_REGEX:
         if rx.search(text):
             hits.append(label)
@@ -114,19 +80,26 @@ def _clean_output(text: str) -> str:
     return text
 
 
-def draft_reply(email: Email, owner_name: str, owner_email: str, context: str = "") -> DraftResult:
+def build_instructions(owner_name: str) -> tuple[str, list[str], dict]:
+    """The system prompt exactly as the drafting model receives it, plus the writer samples and drafting config."""
+    conf = load_drafting()
     profile = load_style() or {}
     samples = profile.get("samples") or []
     style_brief = describe(profile) if profile else (
         "Short, friendly, direct. Opens with 'Hi {name},' and closes with 'Thanks,'. Uses contractions. Around 60 words."
     )
     sample_block = "\n\n---\n\n".join(truncate(s, 900) for s in samples[:8]) if samples else "(no samples learned yet; run `learn-style`)"
-    instructions = SYSTEM_PROMPT.format(
-        owner_name=owner_name or "the mailbox owner",
-        style_brief=style_brief,
-        samples=sample_block,
-        banned_sample=", ".join(BANNED_PHRASES[:18]),
-    )
+    instructions = conf["system_prompt"].format_map({
+        "owner_name": owner_name or "the mailbox owner",
+        "style_brief": style_brief,
+        "samples": sample_block,
+        "banned_sample": ", ".join(conf["banned_phrases"][:18]) or "(none)",
+    })
+    return instructions, samples, conf
+
+
+def draft_reply(email: Email, owner_name: str, owner_email: str, context: str = "") -> DraftResult:
+    instructions, samples, conf = build_instructions(owner_name)
     thread_note = ""
     if email.body_full and len(email.body_full) > len(email.body_text) + 40:
         thread_note = "\n\nEarlier messages in the thread (context only):\n" + truncate(email.body_full[len(email.body_text):], 3000)
@@ -149,7 +122,7 @@ def draft_reply(email: Email, owner_name: str, owner_email: str, context: str = 
         attempts += 1
         text = _clean_output(_complete(client, instructions, messages))
         problems: list[str] = []
-        lint = _lint(text)
+        lint = _lint(text, conf["banned_phrases"])
         if lint:
             problems.append("Contains AI-sounding wording: " + ", ".join(lint[:6]))
         try:
@@ -172,7 +145,7 @@ def draft_reply(email: Email, owner_name: str, owner_email: str, context: str = 
         notes.append(f"Attempt {attempts}: " + " | ".join(problems))
         messages = messages + [
             {"role": "assistant", "content": text},
-            {"role": "user", "content": REVISION_PROMPT.format(problems="\n".join(f"- {p}" for p in problems))},
+            {"role": "user", "content": conf["revision_prompt"].format_map({"problems": "\n".join(f"- {p}" for p in problems)})},
         ]
 
     return DraftResult(body_text=text, attempts=attempts, checks=checks, passed=passed, notes="\n".join(notes))

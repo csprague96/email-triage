@@ -22,3 +22,9 @@ def get_backend() -> MailBackend:
         else:
             raise ValueError(f"Unknown MAIL_BACKEND '{settings.mail_backend}' (use 'outlook' or 'graph')")
     return _backend
+
+
+def reset_backend() -> None:
+    """Forget the cached backend so the next call builds one from the current settings."""
+    global _backend
+    _backend = None

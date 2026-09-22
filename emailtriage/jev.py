@@ -34,6 +34,13 @@ def client() -> TypeSafeClient:
         return _client
 
 
+def reset_client() -> None:
+    """Drop the cached client after the API key or model changed."""
+    global _client
+    with _client_lock:
+        _client = None
+
+
 def build_state(email: Email, owner_email: str, owner_name: str) -> dict:
     owner_domain = domain_of(owner_email)
     sender_domain = domain_of(email.sender_email)

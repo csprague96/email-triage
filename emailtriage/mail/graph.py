@@ -3,8 +3,9 @@
 Use this when classic Outlook is not available (new Outlook, Mac, a server).
 Setup once per organisation: register an app in Entra ID with these delegated
 permissions: Mail.ReadWrite, User.Read; enable "Allow public client flows".
-Put its Application (client) ID in GRAPH_CLIENT_ID. Each colleague then signs
-in once with the device code printed in the terminal.
+Put its Application (client) ID in GRAPH_CLIENT_ID (or paste it in Settings >
+Account). Each colleague then signs in once from the dashboard's sign-in screen
+(or with `python -m emailtriage login`), which uses the device code flow.
 
 Written against the Graph v1.0 REST API but NOT exercised against a live tenant
 in this build. Treat it as a starting point and test before relying on it.
@@ -14,6 +15,7 @@ from __future__ import annotations
 
 import json
 import re
+import threading
 import webbrowser
 from datetime import datetime, timezone
 from pathlib import Path
@@ -36,48 +38,116 @@ SELECT = (
 CATEGORY_PREFIX = "Priority: "
 
 
+class NotSignedIn(RuntimeError):
+    """No cached Microsoft account. Sign in from the dashboard or run `python -m emailtriage login`."""
+
+
 class GraphBackend(MailBackend):
     name = "graph"
 
     def __init__(self) -> None:
         if not settings.graph_client_id:
-            raise RuntimeError("GRAPH_CLIENT_ID is required for MAIL_BACKEND=graph")
+            raise RuntimeError("GRAPH_CLIENT_ID is required for MAIL_BACKEND=graph. Paste it in Settings > Account.")
         self._token: str | None = None
         self._owner: tuple[str, str] | None = None
         self._http = httpx.Client(timeout=30)
+        self._pending: dict | None = None  # device flow in progress: user_code, verification_uri, expires_at
+        self._pending_error: str = ""
+        self._auth_lock = threading.Lock()
 
     # ---- auth ----------------------------------------------------------
 
-    def _acquire_token(self) -> str:
+    def _msal_app(self):
         import msal
 
         cache = msal.SerializableTokenCache()
         if TOKEN_CACHE.exists():
-            cache.deserialize(TOKEN_CACHE.read_text(encoding="utf-8"))
+            try:
+                cache.deserialize(TOKEN_CACHE.read_text(encoding="utf-8"))
+            except Exception:
+                pass
         app = msal.PublicClientApplication(
             settings.graph_client_id,
             authority=f"https://login.microsoftonline.com/{settings.graph_tenant_id}",
             token_cache=cache,
         )
-        result = None
-        accounts = app.get_accounts()
-        if accounts:
-            result = app.acquire_token_silent(SCOPES, account=accounts[0])
-        if not result:
-            flow = app.initiate_device_flow(scopes=SCOPES)
-            if "user_code" not in flow:
-                raise RuntimeError(f"Device flow failed: {json.dumps(flow)}")
-            print("\n" + flow["message"] + "\n", flush=True)
-            try:
-                webbrowser.open(flow["verification_uri"])
-            except Exception:
-                pass
-            result = app.acquire_token_by_device_flow(flow)
-        if "access_token" not in result:
-            raise RuntimeError(f"Graph sign-in failed: {result.get('error_description', result)}")
+        return app, cache
+
+    @staticmethod
+    def _save_cache(cache) -> None:
         if cache.has_state_changed:
             TOKEN_CACHE.write_text(cache.serialize(), encoding="utf-8")
+
+    def _acquire_token(self) -> str:
+        """Silent only. Interactive sign-in is driven by start_sign_in() so it can be shown in the dashboard."""
+        app, cache = self._msal_app()
+        accounts = app.get_accounts()
+        result = app.acquire_token_silent(SCOPES, account=accounts[0]) if accounts else None
+        if not result or "access_token" not in result:
+            raise NotSignedIn("Not signed in to Microsoft 365. Sign in from the dashboard (or run: python -m emailtriage login).")
+        self._save_cache(cache)
         return result["access_token"]
+
+    def start_sign_in(self) -> dict:
+        """Begin the device code flow. Returns the code and URL for the user; completion happens in a background thread."""
+        with self._auth_lock:
+            if self._pending and self._pending["expires_at"] > datetime.now(timezone.utc).timestamp():
+                return dict(self._pending)
+            app, cache = self._msal_app()
+            flow = app.initiate_device_flow(scopes=SCOPES)
+            if "user_code" not in flow:
+                raise RuntimeError(f"Could not start Microsoft sign-in: {flow.get('error_description') or json.dumps(flow)[:300]}")
+            self._pending = {
+                "user_code": flow["user_code"],
+                "verification_uri": flow["verification_uri"],
+                "message": flow["message"],
+                "expires_at": datetime.now(timezone.utc).timestamp() + int(flow.get("expires_in", 900)),
+            }
+            self._pending_error = ""
+
+        def finish() -> None:
+            try:
+                result = app.acquire_token_by_device_flow(flow)
+                if "access_token" in result:
+                    self._save_cache(cache)
+                    self._token = result["access_token"]
+                    self._owner = None
+                else:
+                    self._pending_error = result.get("error_description") or result.get("error") or "sign-in did not complete"
+            except Exception as err:
+                self._pending_error = str(err)
+            finally:
+                with self._auth_lock:
+                    self._pending = None
+
+        threading.Thread(target=finish, daemon=True, name="graph-device-flow").start()
+        return dict(self._pending)
+
+    def auth_state(self) -> dict:
+        """What the sign-in screen needs: signed in?, a flow in progress?, last error."""
+        app, _ = self._msal_app()
+        accounts = app.get_accounts()
+        pending = None
+        with self._auth_lock:
+            if self._pending and self._pending["expires_at"] > datetime.now(timezone.utc).timestamp():
+                pending = {k: v for k, v in self._pending.items() if k != "expires_at"}
+        return {
+            "signed_in": bool(accounts),
+            "account": accounts[0].get("username", "") if accounts else "",
+            "pending": pending,
+            "error": self._pending_error,
+        }
+
+    def sign_out(self) -> None:
+        app, cache = self._msal_app()
+        for acct in app.get_accounts():
+            app.remove_account(acct)
+        self._save_cache(cache)
+        if TOKEN_CACHE.exists():
+            TOKEN_CACHE.unlink()
+        self._token = None
+        self._owner = None
+        self._pending_error = ""
 
     def _headers(self) -> dict:
         if self._token is None:
