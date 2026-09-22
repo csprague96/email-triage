@@ -67,6 +67,8 @@ def _migrate(c: sqlite3.Connection) -> None:
     cols = {r[1] for r in c.execute("PRAGMA table_info(assessments)").fetchall()}
     if "thread_json" not in cols:
         c.execute("ALTER TABLE assessments ADD COLUMN thread_json TEXT")
+    if "handled_at" not in cols:
+        c.execute("ALTER TABLE assessments ADD COLUMN handled_at TEXT")
 
 
 def get_meta(key: str, default: str | None = None) -> str | None:
@@ -105,14 +107,15 @@ def save_assessment(email_id: str, a: Assessment) -> None:
     with _lock:
         conn().execute(
             """INSERT OR REPLACE INTO assessments(email_id,priority,confidence,probabilities,signals,time_sensitivity,
-               tags,tag_scores,jev_priority,adjusted_by_rule,needs_review,model,input_tokens,user_priority,user_tags,assessed_at,thread_json)
+               tags,tag_scores,jev_priority,adjusted_by_rule,needs_review,model,input_tokens,user_priority,user_tags,assessed_at,thread_json,handled_at)
                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,
                  (SELECT user_priority FROM assessments WHERE email_id=?),
-                 (SELECT user_tags FROM assessments WHERE email_id=?), ?, ?)""",
+                 (SELECT user_tags FROM assessments WHERE email_id=?), ?, ?,
+                 (SELECT handled_at FROM assessments WHERE email_id=?))""",
             (
                 email_id, a.priority, a.confidence, json.dumps(a.probabilities), json.dumps(a.signals),
                 a.time_sensitivity, json.dumps(a.tags), json.dumps(a.tag_scores), a.jev_priority,
-                a.adjusted_by_rule, int(a.needs_review), a.model, a.input_tokens, email_id, email_id, _now(), thread_json,
+                a.adjusted_by_rule, int(a.needs_review), a.model, a.input_tokens, email_id, email_id, _now(), thread_json, email_id,
             ),
         )
         conn().commit()
@@ -219,6 +222,17 @@ def record_correction(email_id: str, to_priority: str) -> None:
         conn().commit()
 
 
+def set_handled(email_id: str, handled: bool) -> None:
+    with _lock:
+        conn().execute("UPDATE assessments SET handled_at=? WHERE email_id=?", (_now() if handled else None, email_id))
+        conn().commit()
+
+
+def handled_count_since(since_iso: str) -> int:
+    with _lock:
+        return conn().execute("SELECT COUNT(*) FROM assessments WHERE handled_at >= ?", (since_iso,)).fetchone()[0]
+
+
 def set_user_tags(email_id: str, tags: list[str]) -> None:
     with _lock:
         conn().execute("UPDATE assessments SET user_tags=? WHERE email_id=?", (json.dumps(tags), email_id))
@@ -235,15 +249,26 @@ def recent_corrections(limit: int = 8) -> list[dict]:
 
 
 def list_emails(priority: str | None = None, tag: str | None = None, review: bool | None = None,
-                search: str | None = None, limit: int = 200) -> list[dict]:
+                search: str | None = None, limit: int = 200, priorities: list[str] | None = None,
+                since_iso: str | None = None, handled: bool | None = None) -> list[dict]:
     q = """SELECT e.*, a.priority, a.confidence, a.probabilities, a.signals, a.time_sensitivity, a.tags, a.tag_scores,
-                  a.jev_priority, a.adjusted_by_rule, a.needs_review, a.user_priority, a.user_tags, a.thread_json,
+                  a.jev_priority, a.adjusted_by_rule, a.needs_review, a.user_priority, a.user_tags, a.thread_json, a.handled_at,
                   (SELECT COUNT(*) FROM drafts d WHERE d.email_id=e.id AND d.status='ready') AS ready_drafts
            FROM emails e JOIN assessments a ON a.email_id=e.id WHERE 1=1"""
     args: list = []
     if priority:
         q += " AND COALESCE(a.user_priority, a.priority)=?"
         args.append(priority)
+    if priorities:
+        q += f" AND COALESCE(a.user_priority, a.priority) IN ({','.join('?' * len(priorities))})"
+        args += priorities
+    if since_iso:
+        q += " AND e.received >= ?"
+        args.append(since_iso)
+    if handled is True:
+        q += " AND a.handled_at IS NOT NULL"
+    elif handled is False:
+        q += " AND a.handled_at IS NULL"
     if review:
         q += " AND a.needs_review=1"
     if search:
@@ -267,7 +292,8 @@ def get_email(email_id: str) -> dict | None:
     with _lock:
         r = conn().execute(
             """SELECT e.*, a.priority, a.confidence, a.probabilities, a.signals, a.time_sensitivity, a.tags, a.tag_scores,
-                      a.jev_priority, a.adjusted_by_rule, a.needs_review, a.user_priority, a.user_tags, a.thread_json, 0 AS ready_drafts
+                      a.jev_priority, a.adjusted_by_rule, a.needs_review, a.user_priority, a.user_tags, a.thread_json, a.handled_at,
+                      (SELECT COUNT(*) FROM drafts d WHERE d.email_id=e.id AND d.status='ready') AS ready_drafts
                FROM emails e LEFT JOIN assessments a ON a.email_id=e.id WHERE e.id=?""",
             (email_id,),
         ).fetchone()
@@ -294,6 +320,7 @@ def _email_row(r: sqlite3.Row) -> dict:
         "adjusted_by_rule": r["adjusted_by_rule"], "needs_review": bool(r["needs_review"]),
         "ready_drafts": r["ready_drafts"], "conversation_id": r["conversation_id"],
         "thread": json.loads(r["thread_json"]) if r["thread_json"] else None,
+        "handled_at": r["handled_at"],
     }
 
 

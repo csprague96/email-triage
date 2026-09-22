@@ -1,6 +1,7 @@
 """Command line entry point.
 
   python -m emailtriage check          verify Outlook/Graph, Jev and OpenAI are reachable
+  python -m emailtriage login          sign in to Microsoft 365 (MAIL_BACKEND=graph only)
   python -m emailtriage learn-style    build config/style.json from your Sent Items
   python -m emailtriage run [--hours N] [--limit N] [--force]   triage recent inbox mail once
   python -m emailtriage sample [--hours N]  dry run: print what Jev would decide, store nothing, no drafts
@@ -67,6 +68,36 @@ def cmd_check(_args) -> int:
     print("Writing style: " + (f"learned from {prof.get('emails_analysed')} sent emails" if prof else "not learned yet, run: python -m emailtriage learn-style"))
     print("\nAll good." if ok else "\nFix the items marked FAILED, then run check again.")
     return 0 if ok else 1
+
+
+def cmd_login(_args) -> int:
+    import time
+
+    from .config import settings
+    from .mail import get_backend
+
+    if settings.mail_backend != "graph":
+        print("MAIL_BACKEND is 'outlook': classic Outlook is used as-is, no sign-in needed.")
+        return 0
+    backend = get_backend()
+    state = backend.auth_state()
+    if state["signed_in"]:
+        print(f"Already signed in as {state['account']}. Run `python -m emailtriage check` to test the connection.")
+        return 0
+    flow = backend.start_sign_in()
+    print("\n" + flow["message"] + "\n", flush=True)
+    try:
+        webbrowser.open(flow["verification_uri"])
+    except Exception:
+        pass
+    while backend.auth_state()["pending"]:
+        time.sleep(2)
+    state = backend.auth_state()
+    if state["signed_in"]:
+        print(f"Signed in as {state['account']}.")
+        return 0
+    print(f"Sign-in failed: {state['error']}")
+    return 1
 
 
 def cmd_learn_style(args) -> int:
@@ -203,6 +234,7 @@ def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="emailtriage", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
     sub.add_parser("check").set_defaults(fn=cmd_check)
+    sub.add_parser("login").set_defaults(fn=cmd_login)
     ls = sub.add_parser("learn-style")
     ls.add_argument("--limit", type=int, default=300)
     ls.set_defaults(fn=cmd_learn_style)

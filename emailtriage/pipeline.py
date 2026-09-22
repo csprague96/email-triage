@@ -261,14 +261,15 @@ def housekeeping() -> None:
 
 
 def watch(poll_seconds: int | None = None, stop_event: threading.Event | None = None) -> None:
-    poll = poll_seconds or settings.poll_seconds
     stop_event = stop_event or threading.Event()
-    print(f"[watch] checking inbox every {poll}s (Ctrl+C to stop)", flush=True)
+    print(f"[watch] checking inbox every {poll_seconds or settings.poll_seconds}s (Ctrl+C to stop)", flush=True)
     while not stop_event.is_set():
         try:
             run_once(verbose=True)
         except Exception as err:
             print(f"[watch] run failed: {err}", flush=True)
-            traceback.print_exc()
+            if "sign in" not in str(err).lower():
+                traceback.print_exc()
         housekeeping()
-        stop_event.wait(poll)
+        # Re-read each loop so a change in Settings takes effect without a restart.
+        stop_event.wait(poll_seconds or settings.poll_seconds)
